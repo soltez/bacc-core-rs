@@ -1,0 +1,23 @@
+[package]
+name = "bacc-core-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Primitive no_std types for the bacc ecosystem"
+license = "LGPL-3.0-only"
+repository = "https://github.com/soltez/bacc-core-rs"
+keywords = ["baccarat", "casino", "no_std"]
+categories = ["games", "no-std"]
+
+[lib]
+name = "bacc_core"
+
+[dependencies]
+arrayvec = { version = "0.7", default-features = false }
+kev-rs = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
