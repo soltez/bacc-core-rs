@@ -319,20 +319,17 @@ impl BaccRound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kev::{Rank, Suit};
+    use kev::CardInt;
 
-    use crate::tests::{card, hand};
+    use crate::tests::hand;
 
     // --- BaccRound and BaccOutcome full-chain roundtrips ---
 
     #[test]
     fn roundtrip_player_wins_no_pairs_no_thirds() {
         // player: Eight(8) + Ace(1) = 9; banker: Deuce(2) + Trey(3) = 5
-        let p = hand(&[card(Suit::Club, Rank::Eight), card(Suit::Heart, Rank::Ace)]);
-        let b = hand(&[
-            card(Suit::Diamond, Rank::Deuce),
-            card(Suit::Spade, Rank::Trey),
-        ]);
+        let p = hand(&[CardInt::Card8c, CardInt::CardAh]);
+        let b = hand(&[CardInt::Card2d, CardInt::Card3s]);
         let round = BaccRound::new(p, b, false, None);
         let decoded_round = BaccRound::decode(round.encode());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
@@ -356,16 +353,8 @@ mod tests {
     #[test]
     fn roundtrip_banker_wins_both_thirds() {
         // player: Ace(1) + Deuce(2) + Trey(3) = 6; banker: Five(5) + Six(6) + Seven(7) = 8
-        let p = hand(&[
-            card(Suit::Club, Rank::Ace),
-            card(Suit::Heart, Rank::Deuce),
-            card(Suit::Diamond, Rank::Trey),
-        ]);
-        let b = hand(&[
-            card(Suit::Spade, Rank::Five),
-            card(Suit::Club, Rank::Six),
-            card(Suit::Heart, Rank::Seven),
-        ]);
+        let p = hand(&[CardInt::CardAc, CardInt::Card2h, CardInt::Card3d]);
+        let b = hand(&[CardInt::Card5s, CardInt::Card6c, CardInt::Card7h]);
         let round = BaccRound::new(p, b, true, None);
         let decoded_round = BaccRound::decode(round.encode());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
@@ -389,11 +378,8 @@ mod tests {
     #[test]
     fn roundtrip_tie_both_pairs() {
         // player: Trey(3) + Trey(3) = 6; banker: Eight(8) + Eight(8) = 6; tie, both stand
-        let p = hand(&[card(Suit::Club, Rank::Trey), card(Suit::Heart, Rank::Trey)]);
-        let b = hand(&[
-            card(Suit::Diamond, Rank::Eight),
-            card(Suit::Spade, Rank::Eight),
-        ]);
+        let p = hand(&[CardInt::Card3c, CardInt::Card3h]);
+        let b = hand(&[CardInt::Card8d, CardInt::Card8s]);
         let round = BaccRound::new(p, b, false, None);
         let decoded_round = BaccRound::decode(round.encode());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
@@ -417,8 +403,8 @@ mod tests {
     #[test]
     fn roundtrip_cut_card_index() {
         // player: Trey(3) + Four(4) = 7; banker: Six(6) + Ace(1) = 7; tie, both stand
-        let p = hand(&[card(Suit::Club, Rank::Trey), card(Suit::Heart, Rank::Four)]);
-        let b = hand(&[card(Suit::Diamond, Rank::Six), card(Suit::Spade, Rank::Ace)]);
+        let p = hand(&[CardInt::Card3c, CardInt::Card4h]);
+        let b = hand(&[CardInt::Card6d, CardInt::CardAs]);
         let round = BaccRound::new(p, b, false, Some(3));
         let decoded_round = BaccRound::decode(round.encode());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
@@ -441,16 +427,8 @@ mod tests {
 
     #[test]
     fn roundtrip_forced_third_cut_card_zero() {
-        let p = hand(&[
-            card(Suit::Club, Rank::Deuce),
-            card(Suit::Heart, Rank::Trey),
-            card(Suit::Diamond, Rank::Four),
-        ]);
-        let b = hand(&[
-            card(Suit::Spade, Rank::Ace),
-            card(Suit::Club, Rank::Deuce),
-            card(Suit::Heart, Rank::Trey),
-        ]);
+        let p = hand(&[CardInt::Card2c, CardInt::Card3h, CardInt::Card4d]);
+        let b = hand(&[CardInt::CardAs, CardInt::Card2c, CardInt::Card3h]);
         let round = BaccRound::new(p, b, true, Some(0));
         let decoded_round = BaccRound::decode(round.encode());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
