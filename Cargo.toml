@@ -15,6 +15,9 @@ name = "bacc_core"
 arrayvec = { version = "0.7", default-features = false }
 kev-rs = "0.2"
 
+[dev-dependencies]
+rstest = "0.23"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
