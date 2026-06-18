@@ -35,12 +35,8 @@ pub fn pip_value(card: CardInt) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{BaccHand, pip_value};
-    use kev::{CardInt, Rank, Suit};
+    use kev::CardInt;
     use rstest::rstest;
-
-    pub(crate) fn card(suit: Suit, rank: Rank) -> CardInt {
-        CardInt::from_u8((suit as u8) << 4 | rank as u8).expect("valid card")
-    }
 
     pub(crate) fn hand(cards: &[CardInt]) -> BaccHand {
         let mut h = BaccHand::default();
@@ -51,20 +47,20 @@ mod tests {
     }
 
     #[rstest]
-    #[case(Rank::Ace, 1)]
-    #[case(Rank::Deuce, 2)]
-    #[case(Rank::Trey, 3)]
-    #[case(Rank::Four, 4)]
-    #[case(Rank::Five, 5)]
-    #[case(Rank::Six, 6)]
-    #[case(Rank::Seven, 7)]
-    #[case(Rank::Eight, 8)]
-    #[case(Rank::Nine, 9)]
-    #[case(Rank::Ten, 10)]
-    #[case(Rank::Jack, 10)]
-    #[case(Rank::Queen, 10)]
-    #[case(Rank::King, 10)]
-    fn pip_value_all_ranks(#[case] rank: Rank, #[case] expected: u8) {
-        assert_eq!(pip_value(card(Suit::Club, rank)), expected);
+    #[case(CardInt::CardAc, 1)]
+    #[case(CardInt::Card2c, 2)]
+    #[case(CardInt::Card3c, 3)]
+    #[case(CardInt::Card4c, 4)]
+    #[case(CardInt::Card5c, 5)]
+    #[case(CardInt::Card6c, 6)]
+    #[case(CardInt::Card7c, 7)]
+    #[case(CardInt::Card8c, 8)]
+    #[case(CardInt::Card9c, 9)]
+    #[case(CardInt::CardTc, 10)]
+    #[case(CardInt::CardJc, 10)]
+    #[case(CardInt::CardQc, 10)]
+    #[case(CardInt::CardKc, 10)]
+    fn pip_value_all_ranks(#[case] card: CardInt, #[case] expected: u8) {
+        assert_eq!(pip_value(card), expected);
     }
 }
