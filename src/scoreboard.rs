@@ -282,16 +282,9 @@ impl BaccScoreboard {
 #[cfg(test)]
 mod tests {
     use super::BaccScoreboard;
-    use crate::{BaccHand, BaccRound};
+    use crate::BaccRound;
+    use crate::tests::hand;
     use kev::CardInt;
-
-    fn hand(cards: &[CardInt]) -> BaccHand {
-        let mut h = BaccHand::default();
-        for c in cards {
-            h.take(c);
-        }
-        h
-    }
 
     #[test]
     fn all_scoreboards_accumulate_correctly_over_12_rounds() {
