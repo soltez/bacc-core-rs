@@ -5,7 +5,12 @@ use core::fmt::Write as _;
 
 use crate::{BaccOutcome, BaccRound};
 
-fn to_hex<const IN: usize, const OUT: usize>(bytes: &ArrayVec<u8, IN>) -> ArrayString<OUT> {
+const MAX_ROUNDS: usize = 96;
+const BEAD_PLATE_CAP: usize = MAX_ROUNDS * 2;
+const BIG_ROAD_CAP: usize = MAX_ROUNDS * 3;
+const DERIVED_ROAD_CAP: usize = MAX_ROUNDS;
+
+fn bytes_to_hex<const IN: usize, const OUT: usize>(bytes: &ArrayVec<u8, IN>) -> ArrayString<OUT> {
     let mut s = ArrayString::new();
     for &b in bytes.as_slice() {
         write!(s, "{b:02x}").expect("hex fits capacity");
@@ -13,20 +18,24 @@ fn to_hex<const IN: usize, const OUT: usize>(bytes: &ArrayVec<u8, IN>) -> ArrayS
     s
 }
 
-fn parse_hex<const N: usize>(hex: &str) -> ArrayVec<u8, N> {
+fn hex_to_bytes<const N: usize>(hex: &str) -> ArrayVec<u8, N> {
     let mut v = ArrayVec::new();
-    for chunk in hex.as_bytes().chunks(2) {
-        if chunk.len() == 2 {
-            v.push((hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]));
-        }
+    let nibs = hex.as_bytes();
+    let offset = nibs.len() % 2;
+    if offset == 1 {
+        v.push(hex_to_nib(nibs[0]));
+    }
+    for chunk in nibs[offset..].chunks(2) {
+        v.push((hex_to_nib(chunk[0]) << 4) | hex_to_nib(chunk[1]));
     }
     v
 }
 
-fn hex_nibble(b: u8) -> u8 {
+fn hex_to_nib(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
         _ => 0,
     }
 }
@@ -35,19 +44,19 @@ fn hex_nibble(b: u8) -> u8 {
 ///
 /// Each bead word is two bytes: bits 15-8 = winner's hand value, bits 5-4 = third card flags,
 /// bits 3-2 = pair flags, bits 1-0 = outcome marker.
-pub struct BaccBeadPlate(ArrayVec<u8, 160>);
+pub struct BaccBeadPlate(ArrayVec<u8, BEAD_PLATE_CAP>);
 
 impl BaccBeadPlate {
     /// Encodes the bead plate as a lowercase hex string, oldest bead at the left.
     #[must_use]
-    pub fn encode(&self) -> ArrayString<320> {
-        to_hex::<160, 320>(&self.0)
+    pub fn encode(&self) -> ArrayString<{ BEAD_PLATE_CAP * 2 }> {
+        bytes_to_hex::<BEAD_PLATE_CAP, { BEAD_PLATE_CAP * 2 }>(&self.0)
     }
 
     /// Decodes a [`BaccBeadPlate`] from a lowercase hex string produced by [`BaccBeadPlate::encode`].
     #[must_use]
     pub fn decode(hex: &str) -> Self {
-        Self(parse_hex(hex))
+        Self(hex_to_bytes(hex))
     }
 }
 
@@ -55,35 +64,35 @@ impl BaccBeadPlate {
 ///
 /// Each column record occupies (2n + 1) bytes where n is the row count:
 /// two bytes per row (hand value nibble + outcome byte) followed by one row-count byte.
-pub struct BaccBigRoad(ArrayVec<u8, 256>);
+pub struct BaccBigRoad(ArrayVec<u8, BIG_ROAD_CAP>);
 
 impl BaccBigRoad {
     /// Encodes the big road as a lowercase hex string, oldest column at the left.
     #[must_use]
-    pub fn encode(&self) -> ArrayString<512> {
-        to_hex::<256, 512>(&self.0)
+    pub fn encode(&self) -> ArrayString<{ BIG_ROAD_CAP * 2 }> {
+        bytes_to_hex::<BIG_ROAD_CAP, { BIG_ROAD_CAP * 2 }>(&self.0)
     }
 
     /// Decodes a [`BaccBigRoad`] from a lowercase hex string produced by [`BaccBigRoad::encode`].
     #[must_use]
     pub fn decode(hex: &str) -> Self {
-        Self(parse_hex(hex))
+        Self(hex_to_bytes(hex))
     }
 }
 
 /// The three derived roads: Big Eye Boy, Small Road, and Cockroach Pig.
 ///
 /// Each road is run-length encoded: bits 7-1 = run length, bit 0 = icon (1 = red, 0 = blue).
-pub struct BaccDerivedRoads([ArrayVec<u8, 80>; 3]);
+pub struct BaccDerivedRoads([ArrayVec<u8, DERIVED_ROAD_CAP>; 3]);
 
 impl BaccDerivedRoads {
     /// Encodes all three derived roads as lowercase hex strings.
     #[must_use]
-    pub fn encode(&self) -> [ArrayString<160>; 3] {
+    pub fn encode(&self) -> [ArrayString<{ DERIVED_ROAD_CAP * 2 }>; 3] {
         [
-            to_hex::<80, 160>(&self.0[0]),
-            to_hex::<80, 160>(&self.0[1]),
-            to_hex::<80, 160>(&self.0[2]),
+            bytes_to_hex::<DERIVED_ROAD_CAP, { DERIVED_ROAD_CAP * 2 }>(&self.0[0]),
+            bytes_to_hex::<DERIVED_ROAD_CAP, { DERIVED_ROAD_CAP * 2 }>(&self.0[1]),
+            bytes_to_hex::<DERIVED_ROAD_CAP, { DERIVED_ROAD_CAP * 2 }>(&self.0[2]),
         ]
     }
 
@@ -91,7 +100,11 @@ impl BaccDerivedRoads {
     /// [`BaccDerivedRoads::encode`].
     #[must_use]
     pub fn decode(hex: [&str; 3]) -> Self {
-        Self([parse_hex(hex[0]), parse_hex(hex[1]), parse_hex(hex[2])])
+        Self([
+            hex_to_bytes(hex[0]),
+            hex_to_bytes(hex[1]),
+            hex_to_bytes(hex[2]),
+        ])
     }
 }
 
@@ -104,7 +117,7 @@ pub struct BaccScoreboard {
     // Bead words in chronological order (oldest at index 0, newest at the end).
     // Each word is two bytes: bits 11-8 = winner's hand value, bits 5-4 = third card flags,
     // bits 3-2 = pair flags, bits 1-0 = outcome.
-    bead_plate: ArrayVec<u8, 160>,
+    bead_plate: ArrayVec<u8, BEAD_PLATE_CAP>,
     // Columns in chronological order (oldest at index 0, newest at the end).
     // Each column occupies (2n + 1) bytes (n = row count):
     //   byte 0     - ttttvvvv (bits 7-4 = tie count, bits 3-0 = hand value) of the first row
@@ -113,12 +126,12 @@ pub struct BaccScoreboard {
     //   byte 2n-2  - ttttvvvv of the most recent row
     //   byte 2n-1  - xx33ppww of the most recent row
     //   byte 2n    - row count n
-    big_road: ArrayVec<u8, 256>,
+    big_road: ArrayVec<u8, BIG_ROAD_CAP>,
     // Row counts of the five most recent big road columns (index 0 = current).
     col_heights: [u8; 5],
     // [Big Eye Boy, Small Road, Cockroach Pig] - one run-length-encoded register each.
     // Each byte: bits 7-1 = run length, bit 0 = icon (1 = red, 0 = blue).
-    derived_roads: [ArrayVec<u8, 80>; 3],
+    derived_roads: [ArrayVec<u8, DERIVED_ROAD_CAP>; 3],
 }
 
 impl Default for BaccScoreboard {
@@ -281,10 +294,103 @@ impl BaccScoreboard {
 
 #[cfg(test)]
 mod tests {
-    use super::BaccScoreboard;
+    use super::{
+        BaccBeadPlate, BaccBigRoad, BaccDerivedRoads, BaccScoreboard, bytes_to_hex, hex_to_bytes,
+        hex_to_nib,
+    };
     use crate::BaccRound;
     use crate::tests::hand;
+    use arrayvec::ArrayVec;
     use kev::CardInt;
+
+    #[test]
+    fn bytes_to_hex_single_byte_with_leading_zero() {
+        let mut v: ArrayVec<u8, 4> = ArrayVec::new();
+        v.push(0x09);
+        assert_eq!(bytes_to_hex::<4, 8>(&v).as_str(), "09");
+    }
+
+    #[test]
+    fn bytes_to_hex_multiple_bytes() {
+        let mut v: ArrayVec<u8, 4> = ArrayVec::new();
+        v.push(0x09);
+        v.push(0x03);
+        v.push(0xab);
+        assert_eq!(bytes_to_hex::<4, 8>(&v).as_str(), "0903ab");
+    }
+
+    #[test]
+    fn hex_to_bytes_empty() {
+        let v: ArrayVec<u8, 4> = hex_to_bytes("");
+        assert_eq!(v.as_slice(), &[]);
+    }
+
+    #[test]
+    fn hex_to_bytes_even_length() {
+        let v: ArrayVec<u8, 4> = hex_to_bytes("0903ab");
+        assert_eq!(v.as_slice(), &[0x09, 0x03, 0xab]);
+    }
+
+    #[test]
+    fn hex_to_bytes_odd_length_leading_zero_implied() {
+        let v: ArrayVec<u8, 4> = hex_to_bytes("abc");
+        assert_eq!(v.as_slice(), &[0x0a, 0xbc]);
+    }
+
+    #[test]
+    fn bytes_to_hex_and_hex_to_bytes_roundtrip() {
+        let mut v: ArrayVec<u8, 4> = ArrayVec::new();
+        v.push(0x09);
+        v.push(0x03);
+        v.push(0xab);
+        let hex = bytes_to_hex::<4, 8>(&v);
+        let decoded: ArrayVec<u8, 4> = hex_to_bytes(hex.as_str());
+        assert_eq!(decoded.as_slice(), v.as_slice());
+    }
+
+    #[test]
+    fn hex_to_nib_digit() {
+        assert_eq!(hex_to_nib(b'0'), 0);
+        assert_eq!(hex_to_nib(b'9'), 9);
+    }
+
+    #[test]
+    fn hex_to_nib_lowercase() {
+        assert_eq!(hex_to_nib(b'a'), 10);
+        assert_eq!(hex_to_nib(b'f'), 15);
+    }
+
+    #[test]
+    fn hex_to_nib_uppercase() {
+        assert_eq!(hex_to_nib(b'A'), 10);
+        assert_eq!(hex_to_nib(b'F'), 15);
+    }
+
+    #[test]
+    fn hex_to_nib_invalid() {
+        assert_eq!(hex_to_nib(b'x'), 0);
+    }
+
+    #[test]
+    fn bead_plate_encode_decode_roundtrip() {
+        let hex = "090306120902090307030801062109010802090107120731";
+        assert_eq!(BaccBeadPlate::decode(hex).encode().as_str(), hex);
+    }
+
+    #[test]
+    fn big_road_encode_decode_roundtrip() {
+        let hex = "161229020208010621090103080201090101071201073101";
+        assert_eq!(BaccBigRoad::decode(hex).encode().as_str(), hex);
+    }
+
+    #[test]
+    fn derived_roads_encode_decode_roundtrip() {
+        let hex = ["030605", "0403", "04"];
+        let encoded = BaccDerivedRoads::decode(hex).encode();
+        assert_eq!(encoded[0].as_str(), hex[0]);
+        assert_eq!(encoded[1].as_str(), hex[1]);
+        assert_eq!(encoded[2].as_str(), hex[2]);
+    }
 
     #[test]
     fn all_scoreboards_accumulate_correctly_over_12_rounds() {
@@ -401,5 +507,44 @@ mod tests {
         assert_eq!(dr[0].as_str(), "");
         assert_eq!(dr[1].as_str(), "");
         assert_eq!(dr[2].as_str(), "");
+    }
+
+    #[test]
+    fn first_round_non_tie_starts_big_road_column() {
+        // player: Eight(8) + Ace(1) = 9 natural; banker: Deuce(2) + Trey(3) = 5 -> player wins
+        let mut sb = BaccScoreboard::new();
+        sb.update(&BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        ));
+        assert_eq!(sb.bead_plate().encode().as_str(), "0901");
+        assert_eq!(sb.big_road().encode().as_str(), "090101");
+    }
+
+    #[test]
+    fn big_road_tie_count_saturates_at_15() {
+        // Round 1: player wins -> opens column, big_road[0] = 0x09
+        // Rounds 2-16: 15 ties -> big_road[0] increments to 0xF9 (tie count = 15)
+        // Round 17: 16th tie -> saturation: big_road[0] stays at 0xF9
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let tie = BaccRound::new(
+            hand(&[CardInt::Card4c, CardInt::Card5h]),
+            hand(&[CardInt::Card4d, CardInt::Card5s]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&player_win);
+        for _ in 0..16 {
+            sb.update(&tie);
+        }
+        assert_eq!(sb.big_road().encode().as_str(), "f90101");
     }
 }
