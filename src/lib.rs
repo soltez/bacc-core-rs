@@ -340,6 +340,9 @@ impl BaccRound {
     }
 }
 
+pub mod scoreboard;
+pub use scoreboard::{BaccBeadPlate, BaccBigRoad, BaccDerivedRoads, BaccScoreboard};
+
 #[cfg(test)]
 mod tests {
     use super::*;
