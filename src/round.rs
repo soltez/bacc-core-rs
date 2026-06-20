@@ -1,6 +1,7 @@
 //! Baccarat round types: hand, outcome, and round with encode/decode.
 
-use arrayvec::ArrayVec;
+use arrayvec::{ArrayString, ArrayVec};
+use core::fmt::Write as _;
 use kev::CardInt;
 
 /// A baccarat hand holding the cards dealt to one side (player or banker).
@@ -68,9 +69,9 @@ pub struct BaccOutcome {
 }
 
 impl BaccOutcome {
-    /// Encodes this outcome into a `u32`.
+    /// Encodes this outcome as a lowercase hex string.
     ///
-    /// ## Bit layout
+    /// ## Bit layout (packed into a `u32` before hex encoding)
     ///
     /// | Bits  | Field             | Values                                               |
     /// |-------|-------------------|------------------------------------------------------|
@@ -82,17 +83,24 @@ impl BaccOutcome {
     /// | 8-11  | Player hand value | Player's hand value 0-9                              |
     /// | 12-15 | Banker hand value | Banker's hand value 0-9                              |
     #[must_use]
-    pub fn encode(&self) -> u32 {
-        u32::from(self.marker)
+    pub fn encode(&self) -> ArrayString<8> {
+        let encoded: u32 = u32::from(self.marker)
             | u32::from(self.pairs) << 2
             | u32::from(self.thirds) << 4
             | u32::from(self.player_value) << 8
-            | u32::from(self.banker_value) << 12
+            | u32::from(self.banker_value) << 12;
+        let mut s = ArrayString::new();
+        for b in encoded.to_be_bytes() {
+            write!(s, "{b:02x}").expect("fits");
+        }
+        s
     }
 
-    /// Decodes a [`BaccOutcome`] from the `u32` produced by [`BaccOutcome::encode`].
+    /// Decodes a [`BaccOutcome`] from the hex string produced by [`BaccOutcome::encode`].
     #[must_use]
-    pub fn decode(encoded: u32) -> Self {
+    pub fn decode(hex: &str) -> Self {
+        let bytes: ArrayVec<u8, 4> = crate::hex_to_bytes(hex);
+        let encoded = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         Self {
             banker_value: ((encoded >> 12) & 0xF) as u8,
             player_value: ((encoded >> 8) & 0xF) as u8,
@@ -172,9 +180,9 @@ impl BaccRound {
         }
     }
 
-    /// Encodes the full card sequence and metadata of this round into a `u64`.
+    /// Encodes the full card sequence and metadata of this round as a lowercase hex string.
     ///
-    /// ## Bit layout
+    /// ## Bit layout (packed into a `u64` before hex encoding)
     ///
     /// | Bits  | Field          | Notes                                                        |
     /// |-------|----------------|--------------------------------------------------------------|
@@ -196,38 +204,43 @@ impl BaccRound {
     ///
     /// Panics if either hand contains fewer than two cards.
     #[must_use]
-    pub fn encode(&self) -> u64 {
+    pub fn encode(&self) -> ArrayString<16> {
         let cut = self.cut_card_index.map_or(0u8, |n| n + 1);
         let aux_nib = (u8::from(self.banker_forced_third) << 3) | cut;
         let p = &self.player.cards;
         let b = &self.banker.cards;
         let p2 = if p.len() > 2 { p[2].to_u8() } else { 0 };
         let b2 = if b.len() > 2 { b[2].to_u8() } else { 0 };
-        u64::from(aux_nib) << 48
+        let encoded: u64 = u64::from(aux_nib) << 48
             | u64::from(b2) << 40
             | u64::from(p2) << 32
             | u64::from(b[1].to_u8()) << 24
             | u64::from(p[1].to_u8()) << 16
             | u64::from(b[0].to_u8()) << 8
-            | u64::from(p[0].to_u8())
+            | u64::from(p[0].to_u8());
+        let mut s = ArrayString::new();
+        for b in encoded.to_be_bytes() {
+            write!(s, "{b:02x}").expect("fits");
+        }
+        s
     }
 
-    /// Decodes a [`BaccRound`] from the `u64` produced by [`BaccRound::encode`].
+    /// Decodes a [`BaccRound`] from the hex string produced by [`BaccRound::encode`].
     ///
     /// # Panics
     ///
     /// Panics if any of the four mandatory card bytes decode to `None`, which would
     /// indicate a corrupted encoding.
     #[must_use]
-    pub fn decode(encoded: u64) -> Self {
-        let bytes = encoded.to_le_bytes();
-        let p0 = bytes[0];
-        let b0 = bytes[1];
-        let p1 = bytes[2];
-        let b1 = bytes[3];
-        let p2 = bytes[4];
-        let b2 = bytes[5];
-        let aux_nib = bytes[6];
+    pub fn decode(hex: &str) -> Self {
+        let bytes: ArrayVec<u8, 8> = crate::hex_to_bytes(hex);
+        let aux_nib = bytes[1];
+        let b2 = bytes[2];
+        let p2 = bytes[3];
+        let b1 = bytes[4];
+        let p1 = bytes[5];
+        let b0 = bytes[6];
+        let p0 = bytes[7];
         let banker_forced_third = (aux_nib >> 3) & 1 != 0;
         let cut_raw = aux_nib & 0x7;
         let cut_card_index = if cut_raw == 0 {
@@ -331,7 +344,9 @@ mod tests {
         let p = hand(&[CardInt::Card8c, CardInt::CardAh]);
         let b = hand(&[CardInt::Card2d, CardInt::Card3s]);
         let round = BaccRound::new(p, b, false, None);
-        let decoded_round = BaccRound::decode(round.encode());
+        let encoded_round = round.encode();
+        assert_eq!(encoded_round.as_str(), "00000000112c4086");
+        let decoded_round = BaccRound::decode(encoded_round.as_str());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
         assert_eq!(decoded_round.banker_cards(), round.banker_cards());
         assert!(!decoded_round.is_forced_third());
@@ -342,7 +357,9 @@ mod tests {
         assert_eq!(outcome.thirds(), 0x0);
         assert_eq!(outcome.player_value(), 9);
         assert_eq!(outcome.banker_value(), 5);
-        let decoded_outcome = BaccOutcome::decode(outcome.encode());
+        let encoded_outcome = outcome.encode();
+        assert_eq!(encoded_outcome.as_str(), "00005901");
+        let decoded_outcome = BaccOutcome::decode(encoded_outcome.as_str());
         assert_eq!(decoded_outcome.marker(), 0x1);
         assert_eq!(decoded_outcome.pairs(), 0x0);
         assert_eq!(decoded_outcome.thirds(), 0x0);
@@ -356,7 +373,9 @@ mod tests {
         let p = hand(&[CardInt::CardAc, CardInt::Card2h, CardInt::Card3d]);
         let b = hand(&[CardInt::Card5s, CardInt::Card6c, CardInt::Card7h]);
         let round = BaccRound::new(p, b, true, None);
-        let decoded_round = BaccRound::decode(round.encode());
+        let encoded_round = round.encode();
+        assert_eq!(encoded_round.as_str(), "000825418420138c");
+        let decoded_round = BaccRound::decode(encoded_round.as_str());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
         assert_eq!(decoded_round.banker_cards(), round.banker_cards());
         assert!(decoded_round.is_forced_third());
@@ -367,7 +386,9 @@ mod tests {
         assert_eq!(outcome.thirds(), 0x3);
         assert_eq!(outcome.player_value(), 6);
         assert_eq!(outcome.banker_value(), 8);
-        let decoded_outcome = BaccOutcome::decode(outcome.encode());
+        let encoded_outcome = outcome.encode();
+        assert_eq!(encoded_outcome.as_str(), "00008632");
+        let decoded_outcome = BaccOutcome::decode(encoded_outcome.as_str());
         assert_eq!(decoded_outcome.marker(), 0x2);
         assert_eq!(decoded_outcome.pairs(), 0x0);
         assert_eq!(decoded_outcome.thirds(), 0x3);
@@ -381,7 +402,9 @@ mod tests {
         let p = hand(&[CardInt::Card3c, CardInt::Card3h]);
         let b = hand(&[CardInt::Card8d, CardInt::Card8s]);
         let round = BaccRound::new(p, b, false, None);
-        let decoded_round = BaccRound::decode(round.encode());
+        let encoded_round = round.encode();
+        assert_eq!(encoded_round.as_str(), "0000000016214681");
+        let decoded_round = BaccRound::decode(encoded_round.as_str());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
         assert_eq!(decoded_round.banker_cards(), round.banker_cards());
         assert!(!decoded_round.is_forced_third());
@@ -392,7 +415,9 @@ mod tests {
         assert_eq!(outcome.thirds(), 0x0);
         assert_eq!(outcome.player_value(), 6);
         assert_eq!(outcome.banker_value(), 6);
-        let decoded_outcome = BaccOutcome::decode(outcome.encode());
+        let encoded_outcome = outcome.encode();
+        assert_eq!(encoded_outcome.as_str(), "0000660f");
+        let decoded_outcome = BaccOutcome::decode(encoded_outcome.as_str());
         assert_eq!(decoded_outcome.marker(), 0x3);
         assert_eq!(decoded_outcome.pairs(), 0x3);
         assert_eq!(decoded_outcome.thirds(), 0x0);
@@ -406,7 +431,9 @@ mod tests {
         let p = hand(&[CardInt::Card3c, CardInt::Card4h]);
         let b = hand(&[CardInt::Card6d, CardInt::CardAs]);
         let round = BaccRound::new(p, b, false, Some(3));
-        let decoded_round = BaccRound::decode(round.encode());
+        let encoded_round = round.encode();
+        assert_eq!(encoded_round.as_str(), "000400001c224481");
+        let decoded_round = BaccRound::decode(encoded_round.as_str());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
         assert_eq!(decoded_round.banker_cards(), round.banker_cards());
         assert!(!decoded_round.is_forced_third());
@@ -417,7 +444,9 @@ mod tests {
         assert_eq!(outcome.thirds(), 0x0);
         assert_eq!(outcome.player_value(), 7);
         assert_eq!(outcome.banker_value(), 7);
-        let decoded_outcome = BaccOutcome::decode(outcome.encode());
+        let encoded_outcome = outcome.encode();
+        assert_eq!(encoded_outcome.as_str(), "00007703");
+        let decoded_outcome = BaccOutcome::decode(encoded_outcome.as_str());
         assert_eq!(decoded_outcome.marker(), 0x3);
         assert_eq!(decoded_outcome.pairs(), 0x0);
         assert_eq!(decoded_outcome.thirds(), 0x0);
@@ -430,7 +459,9 @@ mod tests {
         let p = hand(&[CardInt::Card2c, CardInt::Card3h, CardInt::Card4d]);
         let b = hand(&[CardInt::CardAs, CardInt::Card2c, CardInt::Card3h]);
         let round = BaccRound::new(p, b, true, Some(0));
-        let decoded_round = BaccRound::decode(round.encode());
+        let encoded_round = round.encode();
+        assert_eq!(encoded_round.as_str(), "0009214280211c80");
+        let decoded_round = BaccRound::decode(encoded_round.as_str());
         assert_eq!(decoded_round.player_cards(), round.player_cards());
         assert_eq!(decoded_round.banker_cards(), round.banker_cards());
         assert!(decoded_round.is_forced_third());
@@ -441,7 +472,9 @@ mod tests {
         assert_eq!(outcome.thirds(), 0x3);
         assert_eq!(outcome.player_value(), 9);
         assert_eq!(outcome.banker_value(), 6);
-        let decoded_outcome = BaccOutcome::decode(outcome.encode());
+        let encoded_outcome = outcome.encode();
+        assert_eq!(encoded_outcome.as_str(), "00006931");
+        let decoded_outcome = BaccOutcome::decode(encoded_outcome.as_str());
         assert_eq!(decoded_outcome.marker(), 0x1);
         assert_eq!(decoded_outcome.pairs(), 0x0);
         assert_eq!(decoded_outcome.thirds(), 0x3);
