@@ -2,7 +2,7 @@
 
 use arrayvec::{ArrayString, ArrayVec};
 
-use crate::{BaccOutcome, BaccRound};
+use crate::BaccOutcome;
 
 const MAX_ROUNDS: usize = 96;
 const BEAD_PLATE_CAP: usize = MAX_ROUNDS * 2;
@@ -54,8 +54,8 @@ impl BaccScoreboard {
     }
 
     /// Updates all five scoreboards immediately after a completed round.
-    pub fn update(&mut self, round: &BaccRound) {
-        self.update_bead(Self::bead_word(&round.outcome()));
+    pub fn update(&mut self, outcome: &BaccOutcome) {
+        self.update_bead(Self::bead_word(outcome));
     }
 
     /// Resets all five scoreboards to zero.
@@ -298,15 +298,15 @@ mod tests {
             ),
         ];
         let mut sb = BaccScoreboard::new();
-        sb.update(&rounds[0]);
-        sb.update(&rounds[1]);
+        sb.update(&rounds[0].outcome());
+        sb.update(&rounds[1].outcome());
         assert_eq!(sb.encode().as_str(), "09030612");
         assert_eq!(
             crate::bytes_to_hex::<BIG_ROAD_CAP, { BIG_ROAD_CAP * 2 }>(&sb.big_road).as_str(),
             "161201"
         );
         for round in &rounds[2..] {
-            sb.update(round);
+            sb.update(&round.outcome());
         }
         assert_eq!(
             sb.encode().as_str(),
@@ -343,12 +343,15 @@ mod tests {
     fn first_round_non_tie_starts_big_road_column() {
         // player: Eight(8) + Ace(1) = 9 natural; banker: Deuce(2) + Trey(3) = 5 -> player wins
         let mut sb = BaccScoreboard::new();
-        sb.update(&BaccRound::new(
-            hand(&[CardInt::Card8c, CardInt::CardAh]),
-            hand(&[CardInt::Card2c, CardInt::Card3h]),
-            false,
-            None,
-        ));
+        sb.update(
+            &BaccRound::new(
+                hand(&[CardInt::Card8c, CardInt::CardAh]),
+                hand(&[CardInt::Card2c, CardInt::Card3h]),
+                false,
+                None,
+            )
+            .outcome(),
+        );
         assert_eq!(sb.encode().as_str(), "0901");
         assert_eq!(
             crate::bytes_to_hex::<BIG_ROAD_CAP, { BIG_ROAD_CAP * 2 }>(&sb.big_road).as_str(),
@@ -374,9 +377,9 @@ mod tests {
             None,
         );
         let mut sb = BaccScoreboard::new();
-        sb.update(&player_win);
+        sb.update(&player_win.outcome());
         for _ in 0..16 {
-            sb.update(&tie);
+            sb.update(&tie.outcome());
         }
         assert_eq!(
             crate::bytes_to_hex::<BIG_ROAD_CAP, { BIG_ROAD_CAP * 2 }>(&sb.big_road).as_str(),
@@ -462,7 +465,7 @@ mod tests {
         ];
         let mut original = BaccScoreboard::new();
         for round in &rounds {
-            original.update(round);
+            original.update(&round.outcome());
         }
         let reconstructed = BaccScoreboard::decode(original.encode().as_str());
         assert_eq!(original.encode(), reconstructed.encode());
