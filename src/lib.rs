@@ -5,7 +5,7 @@ pub mod round;
 pub mod scoreboard;
 
 pub use round::{BaccHand, BaccOutcome, BaccRound};
-pub use scoreboard::BaccScoreboard;
+pub use scoreboard::{BaccScoreboard, MAX_COL_COUNT, ROWS};
 
 use arrayvec::{ArrayString, ArrayVec};
 use core::fmt::Write as _;
