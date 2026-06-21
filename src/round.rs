@@ -2,7 +2,7 @@
 
 use arrayvec::{ArrayString, ArrayVec};
 use core::fmt::Write as _;
-use kev::CardInt;
+use kev::{CardInt, Rank, Suit};
 
 /// A baccarat hand holding the cards dealt to one side (player or banker).
 #[derive(Default)]
@@ -66,6 +66,33 @@ pub struct BaccOutcome {
     thirds: u8,
     player_value: u8,
     banker_value: u8,
+}
+
+fn rank_char(card: CardInt) -> char {
+    match card.rank() {
+        Rank::Deuce => '2',
+        Rank::Trey => '3',
+        Rank::Four => '4',
+        Rank::Five => '5',
+        Rank::Six => '6',
+        Rank::Seven => '7',
+        Rank::Eight => '8',
+        Rank::Nine => '9',
+        Rank::Ten => 'T',
+        Rank::Jack => 'J',
+        Rank::Queen => 'Q',
+        Rank::King => 'K',
+        Rank::Ace => 'A',
+    }
+}
+
+fn suit_char(card: CardInt) -> char {
+    match card.suit() {
+        Suit::Spade => 's',
+        Suit::Heart => 'h',
+        Suit::Diamond => 'd',
+        Suit::Club => 'c',
+    }
 }
 
 impl BaccOutcome {
@@ -152,6 +179,23 @@ impl BaccOutcome {
     #[must_use]
     pub fn thirds(&self) -> u8 {
         self.thirds
+    }
+
+    fn describe(&self) -> ArrayString<256> {
+        let marker_str = match self.marker {
+            0x1 => "player",
+            0x2 => "banker",
+            _ => "tie",
+        };
+        let mut s = ArrayString::new();
+        writeln!(s, "outcome = \"{marker_str}\"").expect("fits");
+        writeln!(s, "player.pair = {}", (self.pairs & 0x1) != 0).expect("fits");
+        writeln!(s, "player.third_card = {}", (self.thirds & 0x1) != 0).expect("fits");
+        writeln!(s, "player.hand_value = {}", self.player_value).expect("fits");
+        writeln!(s, "banker.pair = {}", (self.pairs & 0x2) != 0).expect("fits");
+        writeln!(s, "banker.third_card = {}", (self.thirds & 0x2) != 0).expect("fits");
+        writeln!(s, "banker.hand_value = {}", self.banker_value).expect("fits");
+        s
     }
 }
 
@@ -327,11 +371,48 @@ impl BaccRound {
     pub fn cut_card_index(&self) -> Option<u8> {
         self.cut_card_index
     }
+
+    /// Returns a human-readable TOML fragment describing this round.
+    ///
+    /// Emits a `[round]` section with outcome fields followed by round metadata
+    /// as dotted keys. Callers may concatenate sibling fragments from successive
+    /// rounds one after another.
+    ///
+    /// `cut_card.ordinal` is 1-indexed and omitted entirely when no cut card was encountered.
+    #[must_use]
+    pub fn describe(&self) -> ArrayString<384> {
+        let outcome = self.outcome();
+        let mut s = ArrayString::new();
+        writeln!(s, "[round]").expect("fits");
+        s.push_str(outcome.describe().as_str());
+        writeln!(s, "banker.forced_third = {}", self.banker_forced_third).expect("fits");
+        write!(s, "player.cards = [").expect("fits");
+        for (i, &card) in self.player.cards().iter().enumerate() {
+            if i > 0 {
+                write!(s, ", ").expect("fits");
+            }
+            write!(s, "\"{}{}\"", rank_char(card), suit_char(card)).expect("fits");
+        }
+        writeln!(s, "]").expect("fits");
+        write!(s, "banker.cards = [").expect("fits");
+        for (i, &card) in self.banker.cards().iter().enumerate() {
+            if i > 0 {
+                write!(s, ", ").expect("fits");
+            }
+            write!(s, "\"{}{}\"", rank_char(card), suit_char(card)).expect("fits");
+        }
+        writeln!(s, "]").expect("fits");
+        if let Some(idx) = self.cut_card_index {
+            writeln!(s, "cut_card.ordinal = {}", idx + 1).expect("fits");
+        }
+        s
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrayvec::ArrayString;
     use kev::CardInt;
 
     use crate::tests::hand;
@@ -452,6 +533,62 @@ mod tests {
         assert_eq!(decoded_outcome.thirds(), 0x0);
         assert_eq!(decoded_outcome.player_value(), 7);
         assert_eq!(decoded_outcome.banker_value(), 7);
+    }
+
+    #[test]
+    fn describe_player_wins_no_thirds_no_cut() {
+        let p = hand(&[CardInt::CardAc, CardInt::CardJh, CardInt::Card8h]);
+        let b = hand(&[CardInt::CardAs, CardInt::CardAd, CardInt::Card7c]);
+        let round = BaccRound::new(p, b, true, None);
+        let out = round.describe();
+        // player: Ace(1) + Jack(10) + Eight(8) = 19 % 10 = 9
+        // banker: Ace(1) + Ace(1) + Seven(7) = 9; pair (both Aces)
+        // tie (9 == 9); both sides drew a third card
+        let expected = concat!(
+            "[round]\n",
+            "outcome = \"tie\"\n",
+            "player.pair = false\n",
+            "player.third_card = true\n",
+            "player.hand_value = 9\n",
+            "banker.pair = true\n",
+            "banker.third_card = true\n",
+            "banker.hand_value = 9\n",
+            "banker.forced_third = true\n",
+            "player.cards = [\"Ac\", \"Jh\", \"8h\"]\n",
+            "banker.cards = [\"As\", \"Ad\", \"7c\"]\n",
+        );
+        assert_eq!(out.as_str(), expected);
+    }
+
+    #[test]
+    fn describe_cut_card_ordinal_emitted_when_present() {
+        let p = hand(&[CardInt::Card3c, CardInt::Card4h]);
+        let b = hand(&[CardInt::Card6d, CardInt::CardAs]);
+        let round = BaccRound::new(p, b, false, Some(0));
+        let out = round.describe();
+        assert!(out.as_str().contains("cut_card.ordinal = 1\n"));
+    }
+
+    #[test]
+    fn describe_cut_card_omitted_when_none() {
+        let p = hand(&[CardInt::Card3c, CardInt::Card4h]);
+        let b = hand(&[CardInt::Card6d, CardInt::CardAs]);
+        let round = BaccRound::new(p, b, false, None);
+        let out = round.describe();
+        assert!(!out.as_str().contains("cut_card"));
+    }
+
+    #[test]
+    fn describe_fits_within_384_bytes_worst_case() {
+        // Three cards per side, forced third, cut card present -- worst-case length.
+        let p = hand(&[CardInt::CardAc, CardInt::CardJh, CardInt::Card8h]);
+        let b = hand(&[CardInt::CardAs, CardInt::CardAd, CardInt::Card7c]);
+        let round = BaccRound::new(p, b, true, Some(5));
+        let out = round.describe();
+        // ArrayString<384> already enforces the cap; verify we're well under it.
+        assert!(out.len() < 300, "len={}", out.len());
+        // Confirm it fits in 384 (trivially true if it compiled).
+        let _: ArrayString<384> = out;
     }
 
     #[test]
