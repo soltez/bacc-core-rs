@@ -9,6 +9,18 @@ const BEAD_PLATE_CAP: usize = MAX_ROUNDS * 2;
 const BIG_ROAD_CAP: usize = MAX_ROUNDS * 3;
 const DERIVED_ROAD_CAP: usize = MAX_ROUNDS;
 
+/// Conventional road height in rows (industry standard for all five baccarat roads).
+pub const ROWS: usize = 6;
+/// Maximum number of columns shown in a rendered road grid.
+pub const MAX_COL_COUNT: usize = 40;
+/// Maximum number of columns shown in a rendered bead plate grid (`MAX_ROUNDS / ROWS`).
+pub(crate) const MAX_BEAD_PLATE_COL_COUNT: usize = MAX_ROUNDS / ROWS;
+/// Maximum entries a single logical column can contribute to a [`MAX_COL_COUNT`]-wide grid.
+///
+/// A column fills [`ROWS`] cells going down, then its dragon tail runs right across the
+/// remaining columns: `MAX_COL_COUNT - 1` more. Total = `MAX_COL_COUNT + ROWS - 1`.
+pub(crate) const MAX_COL_ENTRIES: usize = MAX_COL_COUNT + ROWS - 1;
+
 /// Tracks the five standard baccarat scoreboards for a running shoe.
 ///
 /// Call [`update`] after each round to advance all five boards.
@@ -200,14 +212,573 @@ impl BaccScoreboard {
             self.push_derived_road_icon(i - 1, icon);
         }
     }
+
+    /// Returns the bead plate as a `ROWS`-high grid of at most `cols` columns (capped at
+    /// `MAX_ROUNDS / ROWS`), newest entries filling the rightmost columns.
+    ///
+    /// Each cell is `(bead_byte, aux_byte)` where `bead_byte` = outcome/pair/third card flags
+    /// (bits 7-0 of the bead word) and `aux_byte` = winner's hand value (bits 15-8).
+    /// `(0, 0)` means empty. Oldest entries at index 0.
+    /// Pass the result to the renderer -- no further domain calls needed.
+    #[must_use]
+    pub fn simulate_bead_plate(
+        &self,
+        cols: usize,
+    ) -> ArrayVec<[(u8, u8); ROWS], MAX_BEAD_PLATE_COL_COUNT> {
+        let entries = decode_bead_plate(&self.bead_plate, cols);
+        let mut grid: ArrayVec<[(u8, u8); ROWS], MAX_BEAD_PLATE_COL_COUNT> = ArrayVec::new();
+        for (i, &(bead, aux)) in entries.iter().enumerate() {
+            let col = i / ROWS;
+            let row = i % ROWS;
+            while grid.len() <= col {
+                grid.push([(0u8, 0u8); ROWS]);
+            }
+            grid[col][row] = (bead, aux);
+        }
+        grid
+    }
+
+    /// Returns the big road as a `ROWS`-high grid of at most [`MAX_COL_COUNT`] columns.
+    ///
+    /// Each column is `[(bead, aux); ROWS]`. `(0, 0)` means empty. Oldest column at index 0.
+    /// Pass the result to the renderer — no further domain calls needed.
+    #[must_use]
+    pub fn simulate_big_road(&self) -> ArrayVec<[(u8, u8); ROWS], MAX_COL_COUNT> {
+        simulate(&decode_big_road_cols(&self.big_road), |b| b & 0x03)
+    }
+
+    /// Returns derived road `idx` as a `ROWS`-high grid of at most [`MAX_COL_COUNT`] columns.
+    ///
+    /// `idx`: 0 = Big Eye Boy, 1 = Small Road, 2 = Cockroach Pig.
+    /// Each column is `[(icon, 0); ROWS]` where `icon` is `2` (red), `1` (blue), or `0` (empty).
+    /// Pass the result to the renderer — no further domain calls needed.
+    #[must_use]
+    pub fn simulate_derived_road(&self, idx: usize) -> ArrayVec<[(u8, u8); ROWS], MAX_COL_COUNT> {
+        simulate(&decode_derived_runs(&self.derived_roads[idx]), |b| b)
+    }
+}
+
+/// Windows bead plate bytes to the last `cols * ROWS` entries (capped at
+/// `MAX_BEAD_PLATE_COL_COUNT * ROWS`), returning them as `(bead_byte, aux_byte)` pairs in
+/// chronological order (oldest first).
+///
+/// `bead_byte` = outcome/pair/third card flags (bits 7-0 of the bead word).
+/// `aux_byte` = winner's hand value (bits 15-8 of the bead word).
+fn decode_bead_plate(
+    bytes: &[u8],
+    cols: usize,
+) -> ArrayVec<(u8, u8), { MAX_BEAD_PLATE_COL_COUNT * ROWS }> {
+    let capacity = cols.min(MAX_BEAD_PLATE_COL_COUNT) * ROWS;
+    let start = bytes.len().saturating_sub(capacity * 2);
+    let mut entries: ArrayVec<(u8, u8), { MAX_BEAD_PLATE_COL_COUNT * ROWS }> = ArrayVec::new();
+    for chunk in bytes[start..].chunks_exact(2) {
+        entries.push((chunk[1], chunk[0]));
+    }
+    entries
+}
+
+/// Parses big road bytes (oldest column first) into at most [`MAX_COL_COUNT`] columns.
+///
+/// Reads the internal byte buffer right-to-left. Columns beyond `MAX_COL_ENTRIES`
+/// rows are silently truncated to the oldest `MAX_COL_ENTRIES` rows, as the excess
+/// tail falls outside the display window.
+fn decode_big_road_cols(
+    bytes: &[u8],
+) -> ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> {
+    let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> = ArrayVec::new();
+    let mut pos = bytes.len();
+    while pos > 0 && columns.len() < MAX_COL_COUNT {
+        pos -= 1;
+        let row_count = bytes[pos] as usize;
+        if row_count == 0 {
+            break;
+        }
+        // Skip the newest rows that overflow the display window (2 bytes each).
+        let skip_count = row_count.saturating_sub(MAX_COL_ENTRIES);
+        pos = pos.saturating_sub(skip_count * 2);
+        let take = row_count.min(MAX_COL_ENTRIES);
+        let mut rows: ArrayVec<(u8, u8), MAX_COL_ENTRIES> = ArrayVec::new();
+        for _ in 0..take {
+            pos -= 1;
+            let bead = bytes[pos];
+            pos -= 1;
+            let aux_byte = bytes[pos];
+            rows.push((bead, aux_byte));
+        }
+        rows.reverse();
+        columns.push(rows);
+    }
+    columns.reverse();
+    columns
+}
+
+/// Expands derived road RLE bytes into at most [`MAX_COL_COUNT`] runs.
+///
+/// Each source byte encodes one run: bits 7-1 = run length, bit 0 = icon (1 = red, 0 = blue).
+/// Runs are expanded to `(icon, 0)` pairs where `icon` is `2` (red) or `1` (blue).
+fn decode_derived_runs(
+    bytes: &[u8],
+) -> ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> {
+    let skip = bytes.len().saturating_sub(MAX_COL_COUNT);
+    let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> = ArrayVec::new();
+    for &byte in &bytes[skip..] {
+        let icon: u8 = (byte & 1) + 1;
+        let run_len = (byte >> 1) as usize;
+        let take = run_len.min(MAX_COL_ENTRIES);
+        let mut run: ArrayVec<(u8, u8), MAX_COL_ENTRIES> = ArrayVec::new();
+        for _ in 0..take {
+            run.push((icon, 0u8));
+        }
+        columns.push(run);
+    }
+    columns
+}
+
+/// Simulates the shared grid-fill algorithm used by the big road and all three derived roads.
+///
+/// Implements the standard baccarat dragon-tail convention: the cursor goes down until
+/// blocked (bottom of grid or occupied cell), then turns right. Two supplementary rules
+/// apply during right-turns:
+///
+/// - **Space rule**: while moving right, if the cell directly below the cursor is empty,
+///   resume going down.
+/// - **Color rule**: suppress the Space-rule drop when the cell diagonally below-left
+///   is the same color as the current entry, preventing same-color overlap.
+///
+/// `marker_of` extracts the color key from a bead byte. For the big road pass
+/// `|b| b & 0x03`; for derived roads pass `|b| b`.
+///
+/// Returns at most [`MAX_COL_COUNT`] visual columns. Entries that would land beyond
+/// column `MAX_COL_COUNT - 1` are silently dropped.
+fn simulate<F>(
+    columns: &ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT>,
+    marker_of: F,
+) -> ArrayVec<[(u8, u8); ROWS], MAX_COL_COUNT>
+where
+    F: Fn(u8) -> u8,
+{
+    let mut grid: ArrayVec<[(u8, u8); ROWS], MAX_COL_COUNT> = ArrayVec::new();
+    let mut next_col = 0usize;
+
+    'outer: for column_rows in columns {
+        let start = next_col;
+        if start >= MAX_COL_COUNT {
+            break;
+        }
+        while grid.len() <= start {
+            grid.push([(0u8, 0u8); ROWS]);
+        }
+        next_col = start + 1;
+
+        let mut col = start;
+        let mut row = 0usize;
+        let mut going_down = true;
+
+        for &(bead_byte, aux_byte) in column_rows {
+            if col >= MAX_COL_COUNT {
+                continue 'outer;
+            }
+            while col >= grid.len() {
+                grid.push([(0u8, 0u8); ROWS]);
+            }
+
+            let has_row_below = row + 1 < ROWS;
+            let has_col_to_left = col > 0;
+            let color_conflict = has_row_below
+                && has_col_to_left
+                && marker_of(grid[col - 1][row + 1].0) == marker_of(bead_byte);
+            let is_cell_below_vacant = has_row_below && grid[col][row + 1].0 == 0;
+            let space_below = is_cell_below_vacant && !color_conflict;
+
+            if !going_down && space_below {
+                going_down = true;
+            }
+
+            grid[col][row] = (bead_byte, aux_byte);
+
+            if row == 0 {
+                next_col = next_col.max(col + 1);
+            }
+
+            if going_down && space_below {
+                row += 1;
+            } else {
+                going_down = false;
+                col += 1;
+            }
+        }
+    }
+
+    grid
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BIG_ROAD_CAP, BaccScoreboard, DERIVED_ROAD_CAP};
+    use super::{
+        BIG_ROAD_CAP, BaccScoreboard, DERIVED_ROAD_CAP, MAX_BEAD_PLATE_COL_COUNT, MAX_COL_COUNT,
+        MAX_COL_ENTRIES, ROWS, decode_bead_plate, decode_big_road_cols, decode_derived_runs,
+        simulate,
+    };
     use crate::BaccRound;
     use crate::tests::hand;
+    use arrayvec::ArrayVec;
     use kev::CardInt;
+
+    const R: (u8, u8) = (2, 0);
+    const B: (u8, u8) = (1, 0);
+    const E: (u8, u8) = (0, 0);
+
+    fn col(entries: &[(u8, u8)]) -> ArrayVec<(u8, u8), MAX_COL_ENTRIES> {
+        entries.iter().copied().collect()
+    }
+
+    fn cols(data: &[&[(u8, u8)]]) -> ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> {
+        data.iter().map(|&c| col(c)).collect()
+    }
+
+    fn rep(entry: (u8, u8), n: usize) -> ArrayVec<(u8, u8), MAX_COL_ENTRIES> {
+        (0..n).map(|_| entry).collect()
+    }
+
+    fn one_col(
+        entry: (u8, u8),
+        n: usize,
+    ) -> ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> {
+        let mut outer = ArrayVec::new();
+        outer.push(rep(entry, n));
+        outer
+    }
+
+    #[test]
+    fn decode_bead_plate_empty() {
+        let result: arrayvec::ArrayVec<(u8, u8), { MAX_BEAD_PLATE_COL_COUNT * ROWS }> =
+            decode_bead_plate(&[], 16);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decode_bead_plate_fewer_entries_than_window_returns_all() {
+        // 3 bead words stored as [hand_val, outcome_flags]: bead_byte=outcome, aux_byte=hand_val
+        let bytes = [0x09u8, 0x01, 0x06, 0x02, 0x07, 0x03];
+        let result = decode_bead_plate(&bytes, 16);
+        assert_eq!(
+            result.as_slice(),
+            &[(0x01, 0x09), (0x02, 0x06), (0x03, 0x07)]
+        );
+    }
+
+    #[test]
+    fn decode_bead_plate_cols_param_limits_to_newest_entries() {
+        // 7 bead words; cols=1 -> capacity=1*ROWS=6 entries -> oldest 1 word excluded
+        let bytes = [
+            0x01u8, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07, 0x07,
+        ];
+        let result = decode_bead_plate(&bytes, 1);
+        assert_eq!(
+            result.as_slice(),
+            &[
+                (0x02, 0x02),
+                (0x03, 0x03),
+                (0x04, 0x04),
+                (0x05, 0x05),
+                (0x06, 0x06),
+                (0x07, 0x07)
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_bead_plate_packs_column_major() {
+        // 7 bead words; cols=16 -> all visible; col0 gets rows 0-5, col1 gets row 0 only
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..7 {
+            sb.update(&player_win);
+        }
+        let grid = sb.simulate_bead_plate(16);
+        assert_eq!(grid.len(), 2);
+        for row in 0..ROWS {
+            assert_ne!(grid[0][row].0, 0);
+        }
+        assert_ne!(grid[1][0].0, 0);
+        for row in 1..ROWS {
+            assert_eq!(grid[1][row].0, 0);
+        }
+    }
+
+    #[test]
+    fn simulate_bead_plate_cols_param_excludes_oldest_entries() {
+        // 96 entries (full shoe); cols=10 -> only newest 60 entries visible (10 columns x 6 rows)
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..96 {
+            sb.update(&player_win);
+        }
+        let grid = sb.simulate_bead_plate(10);
+        assert_eq!(grid.len(), 10);
+        for col in &grid {
+            for row in 0..ROWS {
+                assert_ne!(col[row].0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_column_selection_uses_successive_columns() {
+        let grid = simulate(&cols(&[&[R], &[B], &[R]]), |b| b);
+        assert_eq!(grid.len(), 3);
+        assert_eq!(grid[0][0], R);
+        assert_eq!(grid[1][0], B);
+        assert_eq!(grid[2][0], R);
+    }
+
+    #[test]
+    fn simulate_cursor_turns_right_at_bottom() {
+        let grid = simulate(&one_col(R, 7), |b| b);
+        assert!(grid.len() >= 2);
+        assert_eq!(grid[0], [R, R, R, R, R, R]);
+        assert_eq!(grid[1], [E, E, E, E, E, R]);
+    }
+
+    #[test]
+    fn simulate_space_rule_resumes_going_down_when_space_below() {
+        let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> =
+            ArrayVec::new();
+        columns.push(rep(B, 7));
+        columns.push(rep(R, 8));
+        let grid = simulate(&columns, |b| b);
+        assert_eq!(grid[0], [B, B, B, B, B, B]);
+        assert_eq!(grid[1], [R, R, R, R, R, B]);
+        assert_eq!(grid[2][4], R);
+        assert_eq!(grid[2][5], R);
+        assert_eq!(grid[3][5], R);
+    }
+
+    #[test]
+    fn simulate_color_rule_suppresses_drop_at_same_color_diagonal() {
+        let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> =
+            ArrayVec::new();
+        columns.push(rep(R, 8));
+        columns.push(rep(B, 5));
+        columns.push(rep(R, 7));
+        let grid = simulate(&columns, |b| b);
+        assert_eq!(grid[0], [R, R, R, R, R, R]);
+        assert_eq!(grid[1], [B, B, B, B, B, R]);
+        assert_eq!(grid[2], [R, R, R, R, R, R]);
+        assert_eq!(grid[3][4], R);
+        assert_eq!(grid[4][4], R);
+    }
+
+    #[test]
+    fn simulate_double_dragon_two_tails_of_different_color_land_side_by_side() {
+        let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> =
+            ArrayVec::new();
+        columns.push(rep(R, 9));
+        columns.push(rep(B, 8));
+        let grid = simulate(&columns, |b| b);
+        assert_eq!(grid[0], [R, R, R, R, R, R]);
+        assert_eq!(grid[1], [B, B, B, B, B, R]);
+        assert_eq!(grid[2][4], B);
+        assert_eq!(grid[2][5], R);
+        assert_eq!(grid[3][4], B);
+        assert_eq!(grid[3][5], R);
+        assert_eq!(grid[4][4], B);
+    }
+
+    #[test]
+    fn simulate_quintuple_dragon_extremely_rare_one() {
+        let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> =
+            ArrayVec::new();
+        columns.push(rep(B, 12));
+        columns.push(rep(R, 8));
+        columns.push(rep(B, 7));
+        columns.push(rep(R, 6));
+        columns.push(rep(B, 3));
+        columns.push(rep(R, 1));
+        columns.push(rep(B, 3));
+        let grid = simulate(&columns, |b| b);
+        assert_eq!(grid[0], [B, B, B, B, B, B]);
+        assert_eq!(grid[1], [R, R, R, R, R, B]);
+        assert_eq!(grid[2], [B, B, B, B, R, B]);
+        assert_eq!(grid[3], [R, R, R, B, R, B]);
+        assert_eq!(grid[4], [B, B, R, B, R, B]);
+        assert_eq!(grid[5], [R, B, R, B, E, B]);
+        assert_eq!(grid[6][0], B);
+        assert_eq!(grid[6][2], R);
+        assert_eq!(grid[7][0], B);
+        assert_eq!(grid[7][1], B);
+    }
+
+    #[test]
+    fn simulate_sextuple_dragon_sixth_tail_immediately_turn_right() {
+        let mut columns: ArrayVec<ArrayVec<(u8, u8), MAX_COL_ENTRIES>, MAX_COL_COUNT> =
+            ArrayVec::new();
+        columns.push(rep(R, 12));
+        columns.push(rep(B, 9));
+        columns.push(rep(R, 8));
+        columns.push(rep(B, 7));
+        columns.push(rep(R, 6));
+        columns.push(rep(B, 4));
+        columns.push(rep(R, 3));
+        let grid = simulate(&columns, |b| b);
+        assert_eq!(grid[0], [R, R, R, R, R, R]);
+        assert_eq!(grid[1], [B, B, B, B, B, R]);
+        assert_eq!(grid[2], [R, R, R, R, B, R]);
+        assert_eq!(grid[3], [B, B, B, R, B, R]);
+        assert_eq!(grid[4], [R, R, B, R, B, R]);
+        assert_eq!(grid[5], [B, R, B, R, B, R]);
+        assert_eq!(grid[6], [B, R, B, R, E, R]);
+        assert_eq!(grid[7], [B, R, B, E, E, E]);
+        assert_eq!(grid[8][0], B);
+        assert_eq!(grid[8][1], R);
+        assert_eq!(grid[9][0], R);
+        assert_eq!(grid[10][0], R);
+        assert_eq!(grid[10][1], R);
+    }
+
+    #[test]
+    fn decode_big_road_cols_empty() {
+        assert!(decode_big_road_cols(&[]).is_empty());
+    }
+
+    #[test]
+    fn decode_big_road_cols_single_column_one_row() {
+        let result = decode_big_road_cols(&[0x11, 0x02, 0x01]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_slice(), &[(0x02u8, 0x11u8)]);
+    }
+
+    #[test]
+    fn decode_big_road_cols_single_column_two_rows() {
+        let result = decode_big_road_cols(&[0x11, 0x01, 0x12, 0x02, 0x02]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_slice(), &[(0x01u8, 0x11u8), (0x02u8, 0x12u8)]);
+    }
+
+    #[test]
+    fn decode_big_road_cols_two_columns_one_row_each() {
+        let result = decode_big_road_cols(&[0x11, 0x01, 0x01, 0x22, 0x02, 0x01]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].as_slice(), &[(0x01u8, 0x11u8)]);
+        assert_eq!(result[1].as_slice(), &[(0x02u8, 0x22u8)]);
+    }
+
+    #[test]
+    fn decode_derived_runs_empty() {
+        assert!(decode_derived_runs(&[]).is_empty());
+    }
+
+    #[test]
+    fn decode_derived_runs_single_blue_run_of_one() {
+        let result = decode_derived_runs(&[0x02]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_slice(), &[(1u8, 0u8)]);
+    }
+
+    #[test]
+    fn decode_derived_runs_single_red_run_of_one() {
+        let result = decode_derived_runs(&[0x03]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_slice(), &[(2u8, 0u8)]);
+    }
+
+    #[test]
+    fn decode_derived_runs_single_run_length_three() {
+        let result = decode_derived_runs(&[0x06]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_slice(), &[(1u8, 0u8), (1u8, 0u8), (1u8, 0u8)]);
+    }
+
+    #[test]
+    fn decode_derived_runs_two_separate_runs() {
+        let result = decode_derived_runs(&[0x02, 0x03]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].as_slice(), &[(1u8, 0u8)]);
+        assert_eq!(result[1].as_slice(), &[(2u8, 0u8)]);
+    }
+
+    #[test]
+    fn simulate_big_road_41_alternating_drops_oldest_column() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for i in 0..41 {
+            if i % 2 == 0 {
+                sb.update(&player_win);
+            } else {
+                sb.update(&banker_win);
+            }
+        }
+        let grid = sb.simulate_big_road();
+        assert_eq!(grid.len(), MAX_COL_COUNT);
+        for col in &grid {
+            assert_ne!(col[0].0, 0);
+            for row in 1..ROWS {
+                assert_eq!(col[row].0, 0);
+            }
+        }
+        assert_eq!(grid[39][0].0 & 0x03, 0x01);
+        assert_eq!(grid[38][0].0 & 0x03, 0x02);
+    }
+
+    #[test]
+    fn simulate_big_road_46_player_wins_caps_streak_and_banker_visible_at_col1_row0() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..46 {
+            sb.update(&player_win);
+        }
+        sb.update(&banker_win);
+        let grid = sb.simulate_big_road();
+        assert_eq!(grid.len(), MAX_COL_COUNT);
+        // column 0: all ROWS filled with player entries
+        for row in 0..ROWS {
+            assert_eq!(grid[0][row].0 & 0x03, 0x01);
+        }
+        // column 1 row 0: banker win (new streak at next_col=1)
+        assert_eq!(grid[1][0].0 & 0x03, 0x02);
+        // columns 1-39 row 5: player tail entries
+        for col in 1..MAX_COL_COUNT {
+            assert_eq!(grid[col][5].0 & 0x03, 0x01);
+        }
+        // columns 2-39 rows 0-4: empty
+        for col in 2..MAX_COL_COUNT {
+            for row in 0..ROWS - 1 {
+                assert_eq!(grid[col][row].0, 0);
+            }
+        }
+    }
 
     #[test]
     fn all_scoreboards_accumulate_correctly_over_12_rounds() {
