@@ -45,9 +45,12 @@ and Wasm consumers that do not want to pull in an allocator or standard library.
 | `update(&BaccRound)` | Append a resolved round |
 | `encode() -> ArrayString<N>` | Serialize bead plate bytes to hex |
 | `decode(hex)` | Reconstruct all five roads from hex |
+| `apply_hex_diff(hex)` | Apply server hex as incremental diff or full reconstruct |
 | `simulate_bead_plate(cols)` | Bead plate grid (column-major, newest `cols` columns) |
 | `simulate_big_road()` | Big road grid (dragon-tail layout) |
 | `simulate_derived_road(idx)` | One of three derived roads (0=Big Eye Boy, 1=Small Road, 2=Cockroach Pig) |
+| `last_big_road_marker() -> u8` | Outcome bits of the current big road column (`1`=player, `2`=banker, `0`=empty) |
+| `col_heights() -> &[u8]` | Row counts of the five most recent big road columns (index 0 = current) |
 
 ### Simulate cell format
 

@@ -105,6 +105,49 @@ impl BaccScoreboard {
         sb
     }
 
+    /// Applies an incremental diff from a server-supplied bead plate hex string.
+    ///
+    /// If `hex` starts with the current [`encode`] output the new suffix is applied
+    /// bead word by bead word. Otherwise the scoreboard is fully reconstructed via
+    /// [`decode`] -- covering gap, new shoe, and server-reset cases.
+    ///
+    /// [`encode`]: BaccScoreboard::encode
+    /// [`decode`]: BaccScoreboard::decode
+    pub fn apply_hex_diff(&mut self, hex: &str) {
+        let client_hex = self.encode();
+        if hex.starts_with(client_hex.as_str()) {
+            let suffix = &hex[client_hex.len()..];
+            let bytes: ArrayVec<u8, BEAD_PLATE_CAP> = crate::hex_to_bytes(suffix);
+            for word in bytes.chunks_exact(2) {
+                self.update_bead(u16::from_be_bytes([word[0], word[1]]));
+            }
+        } else {
+            *self = Self::decode(hex);
+        }
+    }
+
+    /// Returns the outcome bits of the most recent non-empty big road column.
+    ///
+    /// `1` = player, `2` = banker. Returns `0` when the big road is empty or the
+    /// only column is a shoe-start tie placeholder (row count 0).
+    #[must_use]
+    pub fn last_big_road_marker(&self) -> u8 {
+        if self.big_road.is_empty() {
+            return 0;
+        }
+        self.big_road[self.big_road.len() - 2] & 0x03
+    }
+
+    /// Returns the row counts of the five most recent big road columns.
+    ///
+    /// Index 0 is the current column. Indices 1-3 are the Big Eye Boy, Small Road,
+    /// and Cockroach Pig reference columns. A height of `0` means the column does
+    /// not exist.
+    #[must_use]
+    pub fn col_heights(&self) -> &[u8] {
+        &self.col_heights
+    }
+
     /// Converts a [`BaccOutcome`] into a two-byte bead word for the bead plate.
     ///
     /// | Bits  | Content                                                            |
@@ -953,6 +996,252 @@ mod tests {
             crate::bytes_to_hex::<BIG_ROAD_CAP, { BIG_ROAD_CAP * 2 }>(&sb.big_road).as_str(),
             "f90101"
         );
+    }
+
+    #[test]
+    fn apply_hex_diff_empty_self_applies_all_words() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut reference = BaccScoreboard::new();
+        for _ in 0..4 {
+            reference.update(&player_win);
+        }
+        let hex = reference.encode();
+        let mut sb = BaccScoreboard::new();
+        sb.apply_hex_diff(hex.as_str());
+        assert_eq!(sb.encode(), hex);
+        assert_eq!(sb.big_road, reference.big_road);
+    }
+
+    #[test]
+    fn apply_hex_diff_extends_existing() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..2 {
+            sb.update(&player_win);
+        }
+        let mut full = BaccScoreboard::new();
+        for _ in 0..4 {
+            full.update(&player_win);
+        }
+        let full_hex = full.encode();
+        sb.apply_hex_diff(full_hex.as_str());
+        assert_eq!(sb.encode(), full_hex);
+        assert_eq!(sb.big_road, full.big_road);
+    }
+
+    #[test]
+    fn apply_hex_diff_full_match_is_noop() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..3 {
+            sb.update(&player_win);
+        }
+        let hex_before = sb.encode();
+        sb.apply_hex_diff(hex_before.as_str());
+        assert_eq!(sb.encode(), hex_before);
+    }
+
+    #[test]
+    fn apply_hex_diff_gap_reconstructs() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..3 {
+            sb.update(&player_win);
+        }
+        let mut server = BaccScoreboard::new();
+        for _ in 0..3 {
+            server.update(&banker_win);
+        }
+        let server_hex = server.encode();
+        sb.apply_hex_diff(server_hex.as_str());
+        assert_eq!(sb.encode(), server_hex);
+        assert_eq!(sb.big_road, server.big_road);
+    }
+
+    #[test]
+    fn apply_hex_diff_server_shorter_reconstructs() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..4 {
+            sb.update(&player_win);
+        }
+        let mut short = BaccScoreboard::new();
+        for _ in 0..2 {
+            short.update(&player_win);
+        }
+        let short_hex = short.encode();
+        sb.apply_hex_diff(short_hex.as_str());
+        assert_eq!(sb.encode(), short_hex);
+        assert_eq!(sb.big_road, short.big_road);
+    }
+
+    #[test]
+    fn apply_hex_diff_empty_hex_resets_to_empty() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        for _ in 0..3 {
+            sb.update(&player_win);
+        }
+        sb.apply_hex_diff("");
+        assert_eq!(sb.encode().as_str(), "");
+        assert!(sb.big_road.is_empty());
+    }
+
+    #[test]
+    fn last_big_road_marker_empty_returns_zero() {
+        let sb = BaccScoreboard::new();
+        assert_eq!(sb.last_big_road_marker(), 0);
+    }
+
+    #[test]
+    fn last_big_road_marker_player_column() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&player_win);
+        assert_eq!(sb.last_big_road_marker(), 0x01);
+    }
+
+    #[test]
+    fn last_big_road_marker_banker_column() {
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&banker_win);
+        assert_eq!(sb.last_big_road_marker(), 0x02);
+    }
+
+    #[test]
+    fn last_big_road_marker_tie_only_shoe_start_returns_tie_marker_and_height_is_zero() {
+        let tie = BaccRound::new(
+            hand(&[CardInt::Card4c, CardInt::Card5h]),
+            hand(&[CardInt::Card4d, CardInt::Card5s]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&tie);
+        // Shoe-start tie creates a placeholder column with row count 0.
+        // Marker bits are 0x03 (tie), not a player/banker marker.
+        // Callers must guard via col_heights()[0] > 0 before using the marker.
+        assert_eq!(sb.last_big_road_marker(), 0x03);
+        assert_eq!(sb.col_heights()[0], 0);
+    }
+
+    #[test]
+    fn last_big_road_marker_reflects_current_column_after_switch() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&player_win);
+        sb.update(&player_win);
+        sb.update(&banker_win);
+        assert_eq!(sb.last_big_road_marker(), 0x02);
+    }
+
+    #[test]
+    fn col_heights_empty_all_zero() {
+        let sb = BaccScoreboard::new();
+        assert_eq!(sb.col_heights(), &[0u8; 5]);
+    }
+
+    #[test]
+    fn col_heights_after_one_player_win() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&player_win);
+        assert_eq!(sb.col_heights()[0], 1);
+        for &h in &sb.col_heights()[1..] {
+            assert_eq!(h, 0);
+        }
+    }
+
+    #[test]
+    fn col_heights_exposes_five_entries() {
+        let sb = BaccScoreboard::new();
+        assert_eq!(sb.col_heights().len(), 5);
+    }
+
+    #[test]
+    fn col_heights_tracks_column_transitions() {
+        let player_win = BaccRound::new(
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            false,
+            None,
+        );
+        let banker_win = BaccRound::new(
+            hand(&[CardInt::Card2c, CardInt::Card3h]),
+            hand(&[CardInt::Card8c, CardInt::CardAh]),
+            false,
+            None,
+        );
+        let mut sb = BaccScoreboard::new();
+        sb.update(&player_win);
+        sb.update(&player_win);
+        sb.update(&banker_win);
+        // Current column (banker) has 1 row; previous player column had 2 rows.
+        assert_eq!(sb.col_heights()[0], 1);
+        assert_eq!(sb.col_heights()[1], 2);
     }
 
     #[test]
